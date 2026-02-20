@@ -270,6 +270,10 @@ const IntroScreen = ({ onStart }: { onStart: () => void }) => {
   );
 };
 
+import { supabase } from './lib/supabase';
+
+// ... (previous imports and constants)
+
 // --- 메인 앱 컴포넌트 ---
 export default function App() {
   const [students, setStudents] = useState<Student[]>([]);
@@ -285,21 +289,52 @@ export default function App() {
     setTimeout(() => setToastMessage({ text: '', visible: false }), 3000);
   };
 
-  // Initial Data Load
+  // Initial Data Load from Supabase
   useEffect(() => {
     const fetchStudents = async () => {
       try {
         setError(null);
-        const response = await fetch('/api/students');
-        if (!response.ok) throw new Error(`Failed to fetch: ${response.statusText}`);
-        const data = await response.json();
-        // Ensure client-side sorting just in case, though server handles it
-        const sortedData = data.sort((a: Student, b: Student) => a.name.localeCompare(b.name, 'ko'));
+        
+        // 1. Fetch Students
+        const { data: studentsData, error: studentsError } = await supabase
+          .from('students')
+          .select('*')
+          .order('name', { ascending: true });
+
+        if (studentsError) throw studentsError;
+
+        // 2. Fetch Attendance
+        const { data: attendanceData, error: attendanceError } = await supabase
+          .from('attendance')
+          .select('*');
+
+        if (attendanceError) throw attendanceError;
+
+        // 3. Merge Data
+        const mergedData = studentsData.map((s: any) => {
+          const studentAttendance = new Array(MEETING_DATES.length).fill(0);
+          attendanceData
+            .filter((a: any) => a.student_id === s.id)
+            .forEach((a: any) => {
+              if (a.date_index < MEETING_DATES.length) {
+                studentAttendance[a.date_index] = a.status;
+              }
+            });
+          
+          return {
+            id: String(s.id),
+            name: s.name,
+            attendance: studentAttendance
+          };
+        });
+
+        // Ensure client-side sorting just in case
+        const sortedData = mergedData.sort((a: Student, b: Student) => a.name.localeCompare(b.name, 'ko'));
         setStudents(sortedData);
         setIsConnected(true);
-      } catch (error) {
+      } catch (error: any) {
         console.error("Failed to load students:", error);
-        setError("서버 연결 실패. 오프라인 모드로 동작합니다.");
+        setError("데이터 로딩 실패. Supabase 설정을 확인해주세요.");
         setIsConnected(false);
         
         // Fallback to local data if API fails
@@ -317,53 +352,42 @@ export default function App() {
     fetchStudents();
   }, []);
 
-  // WebSocket Connection
+  // Supabase Realtime Subscription
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    let ws: WebSocket;
-
-    const connect = () => {
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        console.log('WS Connected');
-        setIsConnected(true);
-        setError(null);
-      };
-
-      ws.onclose = () => {
-        console.log('WS Disconnected');
-        setIsConnected(false);
-        // Try to reconnect after 3 seconds
-        setTimeout(connect, 3000);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'UPDATE_ATTENDANCE') {
-            const { studentId, dateIndex, status } = data.payload;
-            
-            setStudents(prevStudents => prevStudents.map(student => {
-              if (student.id === String(studentId)) {
+    const channel = supabase
+      .channel('attendance_updates')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        (payload) => {
+          console.log('Realtime update:', payload);
+          const newRecord = payload.new as any;
+          
+          if (newRecord && newRecord.student_id !== undefined) {
+             setStudents(prevStudents => prevStudents.map(student => {
+              if (student.id === String(newRecord.student_id)) {
                 const newAttendance = [...student.attendance];
-                newAttendance[dateIndex] = status;
+                // Ensure date_index is valid
+                if (newRecord.date_index < newAttendance.length) {
+                    newAttendance[newRecord.date_index] = newRecord.status;
+                }
                 return { ...student, attendance: newAttendance };
               }
               return student;
             }));
           }
-        } catch (e) {
-          console.error("WS Parse Error", e);
         }
-      };
-    };
-
-    connect();
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          setIsConnected(true);
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          setIsConnected(false);
+        }
+      });
 
     return () => {
-      if (ws) ws.close();
+      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -390,16 +414,29 @@ export default function App() {
     }
 
     try {
-      await fetch('/api/attendance/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentId, dateIndex })
-      });
+      // Upsert to Supabase
+      // We need to find the current status to toggle it properly in DB or just send the new status
+      // Since we did optimistic update, we know the new status is 1 or 0.
+      // But wait, we need to know the *new* status to send.
+      // Let's re-calculate it or just use the optimistic value.
+      
+      const currentStudent = students.find(s => s.id === studentId);
+      const currentStatus = currentStudent?.attendance[dateIndex] || 0;
+      const newStatus = 1 - currentStatus; // This is what we *want* to set it to.
+
+      const { error } = await supabase
+        .from('attendance')
+        .upsert({ 
+            student_id: Number(studentId), 
+            date_index: dateIndex, 
+            status: newStatus 
+        }, { onConflict: 'student_id,date_index' });
+
+      if (error) throw error;
+      
     } catch (error) {
       console.error("Failed to toggle attendance:", error);
-      // Revert on error (optional, but good practice)
-      // For simplicity in this demo, we'll skip complex revert logic 
-      // as the next WS message or refresh will fix it.
+      // Revert logic could go here
     }
   };
 
