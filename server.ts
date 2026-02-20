@@ -71,8 +71,15 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 app.use(express.json());
 
+// Logging Middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
 // API: Get all data
 app.get('/api/students', (req, res) => {
+  console.log('API: Fetching students...');
   try {
     const students = db.prepare('SELECT * FROM students ORDER BY name ASC').all() as { id: number, name: string }[];
     const attendance = db.prepare('SELECT * FROM attendance').all() as { student_id: number, date_index: number, status: number }[];
@@ -95,6 +102,7 @@ app.get('/api/students', (req, res) => {
       };
     });
     
+    console.log(`API: Returning ${result.length} students`);
     res.json(result);
   } catch (error) {
     console.error('Error fetching data:', error);

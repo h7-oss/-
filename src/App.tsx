@@ -277,6 +277,8 @@ export default function App() {
   const [showIntro, setShowIntro] = useState(true);
   const [activeView, setActiveView] = useState('list');
   const [toastMessage, setToastMessage] = useState({ text: '', visible: false });
+  const [isConnected, setIsConnected] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const showToast = (text: string) => {
     setToastMessage({ text, visible: true });
@@ -287,14 +289,19 @@ export default function App() {
   useEffect(() => {
     const fetchStudents = async () => {
       try {
+        setError(null);
         const response = await fetch('/api/students');
-        if (!response.ok) throw new Error('Failed to fetch');
+        if (!response.ok) throw new Error(`Failed to fetch: ${response.statusText}`);
         const data = await response.json();
         // Ensure client-side sorting just in case, though server handles it
         const sortedData = data.sort((a: Student, b: Student) => a.name.localeCompare(b.name, 'ko'));
         setStudents(sortedData);
+        setIsConnected(true);
       } catch (error) {
         console.error("Failed to load students:", error);
+        setError("서버 연결 실패. 오프라인 모드로 동작합니다.");
+        setIsConnected(false);
+        
         // Fallback to local data if API fails
         const initialList = INITIAL_NAMES.map((name, index) => ({
           id: String(index + 1),
@@ -314,36 +321,49 @@ export default function App() {
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket;
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'UPDATE_ATTENDANCE') {
-          const { studentId, dateIndex, status } = data.payload;
-          
-          setStudents(prevStudents => prevStudents.map(student => {
-            if (student.id === String(studentId)) {
-              const newAttendance = [...student.attendance];
-              newAttendance[dateIndex] = status;
-              
-              // If it was turned ON remotely, maybe show a toast? 
-              // Or maybe only show toast to the person who clicked?
-              // For now, let's keep the toast local to the clicker to avoid spam,
-              // but update the state for everyone.
-              
-              return { ...student, attendance: newAttendance };
-            }
-            return student;
-          }));
+    const connect = () => {
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log('WS Connected');
+        setIsConnected(true);
+        setError(null);
+      };
+
+      ws.onclose = () => {
+        console.log('WS Disconnected');
+        setIsConnected(false);
+        // Try to reconnect after 3 seconds
+        setTimeout(connect, 3000);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'UPDATE_ATTENDANCE') {
+            const { studentId, dateIndex, status } = data.payload;
+            
+            setStudents(prevStudents => prevStudents.map(student => {
+              if (student.id === String(studentId)) {
+                const newAttendance = [...student.attendance];
+                newAttendance[dateIndex] = status;
+                return { ...student, attendance: newAttendance };
+              }
+              return student;
+            }));
+          }
+        } catch (e) {
+          console.error("WS Parse Error", e);
         }
-      } catch (e) {
-        console.error("WS Parse Error", e);
-      }
+      };
     };
 
+    connect();
+
     return () => {
-      ws.close();
+      if (ws) ws.close();
     };
   }, []);
 
@@ -411,6 +431,8 @@ export default function App() {
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white border border-slate-200 text-xs font-bold tracking-widest text-slate-500 mb-6 uppercase">
               <Calendar size={12} />
               Spring & Summer 2026
+              <span className={`ml-2 w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
+              {error && <span className="text-red-500 normal-case tracking-normal ml-1">{error}</span>}
             </div>
             <LayoutGroup>
               <h1 className="text-4xl md:text-6xl font-black tracking-tight text-slate-900 flex flex-wrap items-center justify-center md:justify-start gap-3">
