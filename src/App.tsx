@@ -185,10 +185,96 @@ interface Student {
   attendance: number[];
 }
 
+// --- 인트로 화면 컴포넌트 ---
+const IntroScreen = ({ onStart }: { onStart: () => void }) => {
+  return (
+    <motion.div 
+      className="fixed inset-0 z-50 bg-slate-900 flex flex-col items-center justify-center p-4 text-white"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0, transition: { duration: 0.8, ease: "easeInOut" } }}
+    >
+      <div className="relative z-10 flex flex-col items-center text-center">
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ duration: 1, ease: "easeOut" }}
+          className="mb-8 relative"
+        >
+          <div className="absolute inset-0 bg-gradient-to-r from-orange-500 to-rose-500 blur-3xl opacity-30 rounded-full" />
+          <Sparkles size={64} className="text-orange-400 relative z-10" />
+        </motion.div>
+
+        <motion.h1 
+          className="text-4xl md:text-6xl font-black tracking-tighter mb-4"
+          initial={{ y: 20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ delay: 0.3, duration: 0.8 }}
+        >
+          은사팀 출석부
+        </motion.h1>
+
+        <motion.p 
+          className="text-lg md:text-xl text-slate-400 font-medium mb-12"
+          initial={{ y: 20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ delay: 0.5, duration: 0.8 }}
+        >
+          우리의 신실한 발걸음을 기록합니다
+        </motion.p>
+
+        <motion.button
+          onClick={onStart}
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          initial={{ y: 20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ delay: 0.8, duration: 0.5 }}
+          className="group relative px-8 py-4 bg-white text-slate-900 rounded-full font-bold text-lg tracking-wide overflow-hidden"
+        >
+          <span className="relative z-10 flex items-center gap-2">
+            시작하기 <Check size={20} />
+          </span>
+          <motion.div 
+            className="absolute inset-0 bg-gradient-to-r from-orange-200 to-rose-200 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+          />
+        </motion.button>
+      </div>
+
+      {/* Background Elements */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        {[...Array(5)].map((_, i) => (
+          <motion.div
+            key={i}
+            className="absolute bg-white/5 rounded-full blur-3xl"
+            style={{
+              width: Math.random() * 300 + 100,
+              height: Math.random() * 300 + 100,
+              top: `${Math.random() * 100}%`,
+              left: `${Math.random() * 100}%`,
+            }}
+            animate={{
+              y: [0, -50, 0],
+              scale: [1, 1.2, 1],
+              opacity: [0.1, 0.3, 0.1],
+            }}
+            transition={{
+              duration: Math.random() * 10 + 10,
+              repeat: Infinity,
+              ease: "easeInOut",
+            }}
+          />
+        ))}
+      </div>
+    </motion.div>
+  );
+};
+
 // --- 메인 앱 컴포넌트 ---
 export default function App() {
   const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showIntro, setShowIntro] = useState(true);
   const [activeView, setActiveView] = useState('list');
   const [toastMessage, setToastMessage] = useState({ text: '', visible: false });
 
@@ -197,42 +283,94 @@ export default function App() {
     setTimeout(() => setToastMessage({ text: '', visible: false }), 3000);
   };
 
+  // Initial Data Load
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      setTimeout(() => {
-        const initialList = INITIAL_NAMES.map((name, index) => ({
-          id: String(index + 1),
-          name,
-          attendance: new Array(MEETING_DATES.length).fill(0),
-        }));
-        setStudents(initialList);
+    const fetchStudents = async () => {
+      try {
+        const response = await fetch('/api/students');
+        if (!response.ok) throw new Error('Failed to fetch');
+        const data = await response.json();
+        setStudents(data);
+      } catch (error) {
+        console.error("Failed to load students:", error);
+      } finally {
         setLoading(false);
-      }, 800);
+      }
     };
-    loadData();
+
+    fetchStudents();
   }, []);
 
-  const handleToggleAttendance = (studentId: string, dateIndex: number) => {
-    let isNowChecked = false;
-    let studentName = "";
+  // WebSocket Connection
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
 
-    const updatedStudents = students.map(student => {
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'UPDATE_ATTENDANCE') {
+          const { studentId, dateIndex, status } = data.payload;
+          
+          setStudents(prevStudents => prevStudents.map(student => {
+            if (student.id === String(studentId)) {
+              const newAttendance = [...student.attendance];
+              newAttendance[dateIndex] = status;
+              
+              // If it was turned ON remotely, maybe show a toast? 
+              // Or maybe only show toast to the person who clicked?
+              // For now, let's keep the toast local to the clicker to avoid spam,
+              // but update the state for everyone.
+              
+              return { ...student, attendance: newAttendance };
+            }
+            return student;
+          }));
+        }
+      } catch (e) {
+        console.error("WS Parse Error", e);
+      }
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, []);
+
+  const handleToggleAttendance = async (studentId: string, dateIndex: number) => {
+    // Optimistic Update
+    let studentName = "";
+    let isNowChecked = false;
+
+    setStudents(prev => prev.map(student => {
       if (student.id === studentId) {
         studentName = student.name;
         const newAttendance = [...student.attendance];
-        newAttendance[dateIndex] = 1 - newAttendance[dateIndex];
-        isNowChecked = newAttendance[dateIndex] === 1;
+        const newStatus = 1 - newAttendance[dateIndex];
+        newAttendance[dateIndex] = newStatus;
+        isNowChecked = newStatus === 1;
         return { ...student, attendance: newAttendance };
       }
       return student;
-    });
-    
-    setStudents(updatedStudents);
+    }));
 
     if (isNowChecked) {
       const randomPraise = PRAISE_MESSAGES[Math.floor(Math.random() * PRAISE_MESSAGES.length)];
       showToast(`${studentName}, ${randomPraise}`);
+    }
+
+    try {
+      await fetch('/api/attendance/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentId, dateIndex })
+      });
+    } catch (error) {
+      console.error("Failed to toggle attendance:", error);
+      // Revert on error (optional, but good practice)
+      // For simplicity in this demo, we'll skip complex revert logic 
+      // as the next WS message or refresh will fix it.
     }
   };
 
@@ -250,7 +388,12 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#f4f5f7] text-slate-900 font-sans pb-16 selection:bg-orange-200">
+    <>
+      <AnimatePresence>
+        {showIntro && <IntroScreen onStart={() => setShowIntro(false)} />}
+      </AnimatePresence>
+
+      <div className="min-h-screen bg-[#f4f5f7] text-slate-900 font-sans pb-16 selection:bg-orange-200">
       <div className="max-w-7xl mx-auto p-4 md:p-8 md:pt-16">
         
         {/* 세련된 미니멀 헤더 */}
@@ -339,7 +482,8 @@ export default function App() {
       </div>
 
       <CenterToast message={toastMessage.text} visible={toastMessage.visible} />
-    </div>
+      </div>
+    </>
   );
 }
 
