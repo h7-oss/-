@@ -290,9 +290,18 @@ export default function App() {
         const response = await fetch('/api/students');
         if (!response.ok) throw new Error('Failed to fetch');
         const data = await response.json();
-        setStudents(data);
+        // Ensure client-side sorting just in case, though server handles it
+        const sortedData = data.sort((a: Student, b: Student) => a.name.localeCompare(b.name, 'ko'));
+        setStudents(sortedData);
       } catch (error) {
         console.error("Failed to load students:", error);
+        // Fallback to local data if API fails
+        const initialList = INITIAL_NAMES.map((name, index) => ({
+          id: String(index + 1),
+          name,
+          attendance: new Array(MEETING_DATES.length).fill(0),
+        })).sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+        setStudents(initialList);
       } finally {
         setLoading(false);
       }
